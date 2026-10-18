@@ -1,0 +1,15 @@
+# OS / Editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+*.log
+
+# Dev & analysis artifacts
+node_modules/
+video_analysis/
+unity_extracted/
+trans_detail_*.jpg
+blob_*.jpg
+GAME VIDEO.mp4
+sprite_catalog.png
