@@ -16,8 +16,61 @@ class AudioManager {
     this.bgmVolume = 0.20; // 20% volume as requested
     this.sfxVolume = 0.80; // 80% default sfx volume
     this.isBgmPlaying = false;
+    this.decayAudio = null;
     this.initAudioElements();
     this.initBgm();
+    this.initDecayAudio();
+  }
+
+  initDecayAudio() {
+    if (this.decayAudio) return;
+    try {
+      this.decayAudio = new Audio();
+      this.decayAudio.preload = 'auto';
+      this.decayAudio.volume = this.muted ? 0 : this.sfxVolume;
+      this.decayAudio.src = 'decay audio.m4a';
+
+      this.decayAudio.addEventListener('error', () => {
+        if (this.decayAudio && this.decayAudio.src.includes('decay%20audio') || (this.decayAudio && this.decayAudio.src.endsWith('decay audio.m4a'))) {
+          console.log('Switching Decay audio fallback to decay.m4a');
+          this.decayAudio.src = 'decay.m4a';
+          this.decayAudio.load();
+        }
+      });
+    } catch (e) {
+      console.warn('Decay audio init exception:', e);
+    }
+  }
+
+  playDecayAudio() {
+    this.initContext();
+    if (!this.decayAudio) this.initDecayAudio();
+    if (this.decayAudio) {
+      try {
+        this.decayAudio.currentTime = 0;
+        this.decayAudio.volume = this.muted ? 0 : this.sfxVolume;
+        const playPromise = this.decayAudio.play();
+        if (playPromise !== undefined) {
+          playPromise.catch((e) => {
+            console.log('Decay audio waiting for gesture, synth fallback:', e);
+            this.playSynth('decay_warning', 0.9);
+          });
+        }
+      } catch (err) {
+        this.playSynth('decay_warning', 0.9);
+      }
+    } else {
+      this.playSynth('decay_warning', 0.9);
+    }
+  }
+
+  stopDecayAudio() {
+    if (this.decayAudio) {
+      try {
+        this.decayAudio.pause();
+        this.decayAudio.currentTime = 0;
+      } catch (e) {}
+    }
   }
 
   initContext() {
@@ -225,6 +278,14 @@ class AudioManager {
         gain.gain.exponentialRampToValueAtTime(0.01, now + 0.42);
         osc.start(now);
         osc.stop(now + 0.45);
+      } else if (name === 'decay_warning') {
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(160, now);
+        osc.frequency.exponentialRampToValueAtTime(50, now + 0.35);
+        gain.gain.setValueAtTime(0.4 * volume, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.35);
+        osc.start(now);
+        osc.stop(now + 0.36);
       } else if (name === 'chomp') {
         // Brutal crunchy monster bite for cursor easter egg
         osc.type = 'sawtooth';
@@ -372,7 +433,7 @@ class ParticleSystem {
       ctx.globalAlpha = alpha;
       ctx.fillStyle = p.color;
 
-      if (p.shape === 'star') {
+      if (p.shape === 'star' || p.shape === 'square') {
         const sz = p.size;
         ctx.fillRect(p.x - sz / 2, p.y - sz / 2, sz, sz);
       } else {
@@ -409,16 +470,29 @@ class AbyssGame {
     this.BASE_R3_OUTER = this.BASE_R2_OUTER / this.R_RATIO; // ~94.6
 
     // Game state
+    const urlParams = new URLSearchParams(window.location.search);
+    const lvlParam = parseInt(urlParams.get('level') || urlParams.get('lvl') || '0', 10);
+    this.startLevelParam = (lvlParam > 0) ? lvlParam : 1;
+
     this.state = 'SPLASH';
     this.hasPlayedIntro = false;
     this.introFading = false;
     this.introVideo = null;
-    this.level = 1;
+    this.level = this.startLevelParam;
     this.lives = 5;
     this.maxLives = 5;
     this.hasKey = false;
     this.keysCollected = 0;
     this.bestDepth = parseInt(localStorage.getItem('abyss_best_depth') || '1', 10);
+
+    if (this.startLevelParam > 1) {
+      setTimeout(() => {
+        const splashBtn = document.getElementById('splash-start-btn');
+        if (splashBtn) {
+          splashBtn.innerHTML = `⚡ TEST LEVEL ${this.startLevelParam} <span class="splash-btn-sub">CLICK TO PLAY DIRECTLY</span>`;
+        }
+      }, 50);
+    }
 
     // Timers & Animations
     this.gameTime = 0;
@@ -492,6 +566,19 @@ class AbyssGame {
     this.dialogueTimer = 0;
     this.alertTimer = 0;
     this.voidFallTimer = 0;
+
+    // Decay Mechanic (Levels >= 4)
+    this.decayActive = false;
+    this.decayDuration = 8.0;
+    this.decayTimer = 8.0;
+    this.decayAudioStarted = false;
+    this.isDecayDemoting = false;
+    this.decayDemoteTimer = 0;
+    this.decayDemoteDuration = 5.8;
+    this.outerRingDecaying = false;
+    this.decayGaugeCanvas = document.getElementById('decay-gauge-canvas');
+    this.decayGaugeCtx = this.decayGaugeCanvas ? this.decayGaugeCanvas.getContext('2d') : null;
+    this.decayGaugeParticles = [];
 
     // Ambient floating stardust
     this.ambientMotes = [];
@@ -581,7 +668,13 @@ class AbyssGame {
 
       if (this.state === 'SPLASH') {
         if (e.code === 'Space' || e.code === 'Enter') {
-          this.startIntroSequence();
+          if (this.startLevelParam > 1) {
+            this.audio.initContext();
+            this.audio.playBgm();
+            this.startGame(this.startLevelParam);
+          } else {
+            this.startIntroSequence();
+          }
         }
       } else if (this.state === 'INTRO') {
         if (e.code === 'Space' || e.code === 'Escape' || e.code === 'Enter') {
@@ -589,7 +682,7 @@ class AbyssGame {
         }
       } else if (this.state === 'START' || this.state === 'MENU') {
         if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Enter') {
-          this.startGame();
+          this.startGame(this.startLevelParam);
         }
       } else if (this.state === 'GAMEOVER') {
         if (e.code === 'Space' || e.code === 'Enter') {
@@ -598,6 +691,14 @@ class AbyssGame {
       } else if (this.state === 'PLAYING') {
         if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
           this.triggerJump();
+        } else if (e.code === 'KeyL') {
+          const target = prompt('Jump to level (1-14):', this.level);
+          const parsed = parseInt(target, 10);
+          if (parsed && parsed >= 1) {
+            this.level = parsed;
+            this.spawnLevel(this.level);
+            this.updateHUD();
+          }
         }
       }
     });
@@ -689,7 +790,13 @@ class AbyssGame {
     if (splashBtn) {
       splashBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        this.startIntroSequence();
+        if (this.startLevelParam > 1) {
+          this.audio.initContext();
+          this.audio.playBgm();
+          this.startGame(this.startLevelParam);
+        } else {
+          this.startIntroSequence();
+        }
       });
       splashBtn.addEventListener('pointerdown', (e) => {
         e.stopPropagation();
@@ -800,15 +907,6 @@ class AbyssGame {
       charBox.addEventListener('click', (e) => {
         e.stopPropagation();
         this.triggerCursorEater(e);
-      });
-    }
-
-    const gameoverOverlay = document.getElementById('gameover-overlay');
-    if (gameoverOverlay) {
-      gameoverOverlay.addEventListener('click', (e) => {
-        if (this.state === 'GAMEOVER') {
-          this.restartGame();
-        }
       });
     }
   }
@@ -1153,7 +1251,7 @@ class AbyssGame {
     this.alertTimer = 0;
   }
 
-  startGame() {
+  startGame(overrideLevel = null) {
     this.audio.initContext();
     this.audio.play('start', 0.85);
     this.audio.playBgm(); // Loop BGM throughout gameplay at 20% volume
@@ -1166,7 +1264,7 @@ class AbyssGame {
     if (intro) intro.classList.add('hidden');
 
     this.state = 'PLAYING';
-    this.level = 1;
+    this.level = (overrideLevel !== null && overrideLevel > 0) ? overrideLevel : (this.startLevelParam || 1);
     this.lives = this.maxLives;
     this.hasKey = false;
     this.keysCollected = 0;
@@ -1194,7 +1292,7 @@ class AbyssGame {
     if (go) go.classList.add('hidden');
 
     this.state = 'PLAYING';
-    this.level = 1;
+    this.level = (this.startLevelParam > 1) ? this.startLevelParam : 1;
     this.lives = this.maxLives;
     this.hasKey = false;
     this.keysCollected = 0;
@@ -1290,47 +1388,41 @@ class AbyssGame {
       });
 
     } else if (level === 4) {
-      // --- TWIST 2: SILENT INVERTED CONTROLS ---
-      this.levelMode = 'LASER_INVERT';
-      this.controlsInverted = true;
-      this.targetTimeScale = 0.75;
-      this.timeScale = 0.75;
+      // --- LEVEL 4: DECAY INTRO (SIMPLE OBSTACLES + 8S DECAY METER) ---
+      // User requirement: "From the level fourth, keep it simple. But at level four the decay meter comes, And like a countdown of eight seconds will be started."
+      this.levelMode = 'NORMAL';
+      this.controlsInverted = false;
+      this.targetTimeScale = 1.0;
+      this.timeScale = 1.0;
       this.hideDialogue();
-      this.hideAlert(); // DO NOT write anything!
+      this.hideAlert();
       if (this.container) this.container.classList.remove('screen-invert');
 
-      // Player spawns at top (12 o'clock)
-      this.player.angle = 3 * Math.PI / 2;
+      // Player spawns at bottom (6 o'clock)
+      this.player.angle = Math.PI / 2;
 
-      // Door hidden at start until lasers close in
-      this.door.visible = false;
+      this.door.visible = true;
       this.door.unlocked = false;
-      this.door.angle = 4 * Math.PI / 3;
+      this.door.angle = (this.player.angle + Math.PI * 1.5) % (Math.PI * 2);
+
+      this.keyItem.angle = (this.player.angle + Math.PI * 0.75) % (Math.PI * 2);
+      this.keyItem.collected = false;
       this.hasKey = false;
-      this.keyItem.collected = true;
 
-      // Inverted lasers moving from bottom up and from right left
-      this.lasers.push({
-        id: 'bottom_up',
-        type: 'horizontal',
-        pos: this.cy + 320 * this.scale,
-        targetPos: this.cy - 165 * this.scale,
-        speed: 135 * this.scale,
-        thickness: 7 * this.scale,
-        color: '#00ffff',
-        active: true
-      });
+      // Clean, simple hazards for the 8s time challenge
+      this.spikes = [
+        { angle: (this.player.angle + Math.PI * 0.38) % (Math.PI * 2), spriteIdx: 0, isRetracting: false, isExtended: true },
+        { angle: (this.player.angle + Math.PI * 1.15) % (Math.PI * 2), spriteIdx: 1, isRetracting: false, isExtended: true }
+      ];
 
-      this.lasers.push({
-        id: 'right_left',
-        type: 'vertical',
-        pos: this.cx + 320 * this.scale,
-        targetPos: this.cx - 80 * this.scale,
-        speed: 135 * this.scale,
-        thickness: 7 * this.scale,
-        color: '#00ffff',
-        active: true
-      });
+      this.flyingSaws = [
+        {
+          angle: (this.player.angle + Math.PI) % (Math.PI * 2),
+          orbitSpeed: -0.4,
+          heightOffset: 26,
+          rotation: 0
+        }
+      ];
 
     } else if (level === 5) {
       // --- RAGE BAIT LEVEL 1: SUDDEN AMBUSH SPIKES ---
@@ -1790,6 +1882,45 @@ class AbyssGame {
       }
     }
 
+    // --- DECAY MECHANIC CONFIGURATION (ACTIVE FOR LEVEL >= 4) ---
+    // User requirement: "the decay concept will remain after level 3"
+    if (level >= 4) {
+      this.decayActive = true;
+      this.decayDuration = 8.0;
+      this.decayTimer = this.decayDuration;
+      this.decayAudioStarted = false;
+      this.isDecayDemoting = false;
+      this.outerRingDecaying = false;
+      this.decayGaugeParticles = [];
+      if (this.player) {
+        this.player.isFloatingInSpace = false;
+        this.player.tumbleAngle = 0;
+      }
+      this.audio.stopDecayAudio();
+
+      const container = document.getElementById('decay-meter-container');
+      if (container) container.classList.remove('hidden', 'caution-phase', 'warning-phase');
+      const timerVal = document.getElementById('decay-timer-val');
+      if (timerVal) timerVal.textContent = '8.0s';
+      const barFill = document.getElementById('decay-bar-fill');
+      if (barFill) barFill.style.width = '100%';
+      this.renderDecayGauge(0.016, 1.0);
+    } else {
+      this.decayActive = false;
+      this.decayAudioStarted = false;
+      this.isDecayDemoting = false;
+      this.outerRingDecaying = false;
+      this.decayGaugeParticles = [];
+      if (this.player) {
+        this.player.isFloatingInSpace = false;
+        this.player.tumbleAngle = 0;
+      }
+      this.audio.stopDecayAudio();
+
+      const container = document.getElementById('decay-meter-container');
+      if (container) container.classList.add('hidden');
+    }
+
     this.updateHUD();
   }
 
@@ -1980,6 +2111,22 @@ class AbyssGame {
     this.player.radialHeight = 0;
     this.player.angle = this.door.angle;
 
+    // Reset decay timer on clear as requested by user
+    if (this.decayActive) {
+      this.decayTimer = this.decayDuration;
+      this.decayAudioStarted = false;
+      this.decayGaugeParticles = [];
+      this.audio.stopDecayAudio();
+      this.screenShake = 0;
+      const container = document.getElementById('decay-meter-container');
+      if (container) container.classList.remove('caution-phase', 'warning-phase');
+      const barFill = document.getElementById('decay-bar-fill');
+      if (barFill) barFill.style.width = '100%';
+      const timerVal = document.getElementById('decay-timer-val');
+      if (timerVal) timerVal.textContent = '8.0s';
+      this.renderDecayGauge(0.016, 1.0);
+    }
+
     this.audio.play('win', 1.0);
 
     const rGate = (this.BASE_R1_OUTER * this.scale) + this.getWobble(this.door.angle, this.gameTime, 1.2);
@@ -1991,6 +2138,484 @@ class AbyssGame {
       life: 0.8,
       size: 5 * this.scale
     });
+  }
+
+  updateDecay(dt) {
+    if (this.isDecayDemoting) {
+      // Keep gauge rendering at 0% during zero-g float
+      this.renderDecayGauge(dt, 0);
+
+      // Space floating physics when outer surface disintegrated
+      this.decayDemoteTimer += dt;
+      const p = this.player;
+
+      // Cinematic zero-g inward drift: player floats automatically and smoothly all the way to center (0.0s - 2.4s)
+      // No key presses (W / Up) required
+      const floatProgress = Math.min(1.0, this.decayDemoteTimer / 2.4);
+      const floatEase = floatProgress < 0.5
+        ? 4 * floatProgress * floatProgress * floatProgress
+        : 1 - Math.pow(-2 * floatProgress + 2, 3) / 2;
+
+      const floorR = this.getFloorRadius(p.angle) - 2 * this.scale;
+      const startR = (this.decayDemoteStartRadius !== undefined) ? this.decayDemoteStartRadius : floorR;
+      const currentR = startR * (1 - floatEase);
+      p.radialHeight = floorR - currentR;
+      p.isGrounded = false;
+      p.vr = 0;
+
+      // Gentle zero-g tumbling rotation as player drifts into center
+      p.omega *= Math.pow(0.92, dt * 60);
+      p.angle -= p.omega * dt;
+      p.tumbleAngle = (p.tumbleAngle || 0) + (0.75 + Math.abs(p.omega)) * dt;
+
+      // Visual Timeline per User Requirements:
+      // 0.0s - 2.4s: Floor disappears, player floats smoothly and automatically all the way to center
+      // 2.4s - 4.6s: Once player reaches center, fine retro black & red pixel corruption creeps in towards center
+      // 4.6s - 5.2s: Glitch transition (scanlines & chromatic flicker with glitch audio)
+      // 5.2s - 5.8s: Clean black screen void (blackout)
+      // 5.8s+: Regress to previous level, fade out smoothly into new level!
+      const overlay = document.getElementById('decay-demote-overlay');
+      if (overlay) {
+        if (this.decayDemoteTimer >= 4.6 && this.decayDemoteTimer < 5.2) {
+          // Phase 1: Earlier subtle glitch effect
+          if (!overlay.classList.contains('glitch-active')) {
+            overlay.classList.remove('hidden', 'blackout', 'fade-out');
+            overlay.classList.add('glitch-active');
+            this.audio.play('glitch', 0.85);
+          }
+        } else if (this.decayDemoteTimer >= 5.2) {
+          // Phase 2: Clean solid black screen void
+          if (!overlay.classList.contains('blackout')) {
+            overlay.classList.remove('glitch-active');
+            overlay.classList.add('blackout');
+          }
+        }
+      }
+
+      // Finish demotion and regress to previous level
+      if (this.decayDemoteTimer >= this.decayDemoteDuration) {
+        const prevLevel = Math.max(1, this.level - 1);
+        this.isDecayDemoting = false;
+        p.isFloatingInSpace = false;
+        p.radialHeight = 0;
+        p.vr = 0;
+        p.isGrounded = true;
+        p.tumbleAngle = 0;
+        this.outerRingDecaying = false;
+        this.decayAudioStarted = false;
+        this.audio.stopDecayAudio();
+
+        if (overlay) {
+          overlay.classList.remove('blackout', 'glitch-active');
+          overlay.classList.add('fade-out');
+          setTimeout(() => {
+            overlay.classList.add('hidden');
+            overlay.classList.remove('fade-out');
+          }, 700);
+        }
+
+        this.level = prevLevel;
+        this.spawnLevel(this.level);
+        this.updateHUD();
+      }
+      return;
+    }
+
+    // Normal decay countdown
+    this.decayTimer = Math.max(0, this.decayTimer - dt);
+    const pct = Math.max(0, Math.min(1, this.decayTimer / this.decayDuration));
+
+    // Update UI elements & state classes
+    const timerVal = document.getElementById('decay-timer-val');
+    const barFill = document.getElementById('decay-bar-fill');
+    const container = document.getElementById('decay-meter-container');
+
+    if (timerVal) timerVal.textContent = this.decayTimer.toFixed(1) + 's';
+    if (barFill) barFill.style.width = (pct * 100) + '%';
+
+    if (container) {
+      if (pct <= 0.25) {
+        container.classList.add('warning-phase');
+        container.classList.remove('caution-phase');
+      } else if (pct <= 0.5) {
+        container.classList.add('caution-phase');
+        container.classList.remove('warning-phase');
+      } else {
+        container.classList.remove('caution-phase', 'warning-phase');
+      }
+    }
+
+    // Render the Semicircular Segmented Decay Gauge
+    this.renderDecayGauge(dt, pct);
+
+    // Halfway mark (4.0s or less):
+    // 1. Play decay audio
+    // 2. Increase camera shake noticeably as requested by user
+    if (this.decayTimer <= 4.0) {
+      if (!this.decayAudioStarted) {
+        this.decayAudioStarted = true;
+        this.audio.playDecayAudio();
+      }
+
+      // Camera shake scales up noticeably as timer approaches zero (increased intensity)
+      const shakeFactor = (4.0 - this.decayTimer) / 4.0;
+      this.screenShake = Math.max(this.screenShake, 4.0 + shakeFactor * 7.0);
+    }
+
+    // Timer hits 0: Trigger zero-g disintegration & space float demotion!
+    if (this.decayTimer <= 0 && !this.isDecayDemoting) {
+      this.triggerDecayDemote();
+    }
+  }
+
+  triggerDecayDemote() {
+    this.isDecayDemoting = true;
+    this.decayDemoteTimer = 0;
+    this.outerRingDecaying = true;
+    this.player.isFloatingInSpace = true;
+    this.player.isGrounded = false;
+    this.player.vr = 0;
+    this.screenShake = 18; // Platform collapse impact
+
+    const floorR = this.getFloorRadius(this.player.angle) - 2 * this.scale;
+    this.decayDemoteStartRadius = Math.max(10, floorR - this.player.radialHeight);
+
+    this.audio.play('hit', 1.0);
+
+    // Start decay audio if not already playing so it plays completely
+    if (!this.decayAudioStarted) {
+      this.decayAudioStarted = true;
+      this.audio.playDecayAudio();
+    }
+
+    // Emit crumbling ring shards all around the outer ring
+    for (let a = 0; a < Math.PI * 2; a += 0.2) {
+      const r = (this.BASE_R0_OUTER * this.scale);
+      const px = this.cx + r * Math.cos(a);
+      const py = this.cy + r * Math.sin(a);
+      this.particles.emit(px, py, 4, {
+        color: Math.random() < 0.5 ? '#ff0055' : '#ff9900',
+        speed: 110 * this.scale,
+        life: 0.8,
+        size: 4 * this.scale
+      });
+    }
+  }
+
+  // Neon color transition based on decay percentage
+  getDecayColor(pct) {
+    if (pct > 0.5) {
+      // 1.0 (Cyber Green #00ff9d) -> 0.5 (Solar Gold #ffd000)
+      const t = (pct - 0.5) / 0.5;
+      const r = Math.round(255 * (1 - t));
+      const g = Math.round(208 + (255 - 208) * t);
+      const b = Math.round(157 * t);
+      return {
+        main: `rgb(${r}, ${g}, ${b})`,
+        glow: t > 0.65 ? '#00ff9d' : '#ffe600'
+      };
+    } else {
+      // 0.5 (Solar Gold #ffd000) -> 0.0 (Neon Crimson #ff0055)
+      const t = Math.max(0, pct / 0.5);
+      const r = 255;
+      const g = Math.round(208 * t);
+      const b = Math.round(85 * (1 - t));
+      return {
+        main: `rgb(${r}, ${g}, ${b})`,
+        glow: '#ff0055'
+      };
+    }
+  }
+
+  // Renders the glowing left-edge semicircle decay gauge (Anchored to left border in semicircle format showing 8s)
+  renderDecayGauge(dt, pct) {
+    if (!this.decayGaugeCanvas) {
+      this.decayGaugeCanvas = document.getElementById('decay-gauge-canvas');
+      if (this.decayGaugeCanvas) {
+        this.decayGaugeCtx = this.decayGaugeCanvas.getContext('2d');
+      }
+    }
+    const ctx = this.decayGaugeCtx;
+    if (!ctx) return;
+
+    const w = this.decayGaugeCanvas.width;
+    const h = this.decayGaugeCanvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const cy = h / 2;
+    const decayColor = this.getDecayColor(pct);
+
+    // 1. Dark high-contrast glass backing semicircle (Flat against left edge, curving right)
+    const rBacking = 330;
+    ctx.beginPath();
+    ctx.arc(0, cy, rBacking, -Math.PI / 2, Math.PI / 2, false);
+    ctx.lineTo(0, cy - rBacking);
+    ctx.closePath();
+
+    const bgGrad = ctx.createRadialGradient(0, cy, 30, 0, cy, rBacking);
+    bgGrad.addColorStop(0, 'rgba(18, 12, 30, 0.97)');
+    bgGrad.addColorStop(0.74, 'rgba(8, 4, 16, 0.98)');
+    bgGrad.addColorStop(1, 'rgba(3, 1, 6, 1.0)');
+    ctx.fillStyle = bgGrad;
+    ctx.fill();
+
+    // Subtle luminous outer stroke
+    ctx.strokeStyle = decayColor.glow;
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 3.5;
+    ctx.stroke();
+    ctx.globalAlpha = 1.0;
+
+    // 2. Semicircular Segmented Radial Arc (180 degree true semicircle from -PI/2 to +PI/2)
+    const totalSegments = 24;
+    const dTheta = Math.PI / totalSegments;
+    const gap = 0.032;
+    const activeCount = Math.round(pct * totalSegments);
+    const rInner = 260;
+    const rOuter = 314; // 54px chunky block width
+    const rMid = (rInner + rOuter) / 2;
+
+    for (let i = 0; i < totalSegments; i++) {
+      const a0 = -Math.PI / 2 + i * dTheta + gap / 2;
+      const a1 = -Math.PI / 2 + (i + 1) * dTheta - gap / 2;
+      const isActive = i < activeCount;
+
+      ctx.beginPath();
+      ctx.arc(0, cy, rOuter, a0, a1, false);
+      ctx.arc(0, cy, rInner, a1, a0, true);
+      ctx.closePath();
+
+      if (isActive) {
+        ctx.save();
+        ctx.fillStyle = decayColor.main;
+        ctx.shadowColor = decayColor.glow;
+        ctx.shadowBlur = 16;
+        ctx.fill();
+        ctx.restore();
+      } else {
+        // Inactive sleek translucent track segment
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.06)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+
+    // 3. Crisp Semicircle Time Markers ("8s", "6s", "4s", "2s", "0s")
+    // Showing 8 seconds explicitly formatted along the semicircle curve
+    const markers = [
+      { text: '8s', angle: -Math.PI / 2 },
+      { text: '6s', angle: -Math.PI / 4 },
+      { text: '4s', angle: 0 },
+      { text: '2s', angle: Math.PI / 4 },
+      { text: '0s', angle: Math.PI / 2 }
+    ];
+
+    ctx.save();
+    ctx.font = "800 13px 'Press Start 2P', monospace";
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    const rMarker = 236;
+    for (const m of markers) {
+      const mx = Math.max(22, rMarker * Math.cos(m.angle));
+      const my = cy + rMarker * Math.sin(m.angle);
+      ctx.fillStyle = decayColor.glow;
+      ctx.shadowColor = decayColor.glow;
+      ctx.shadowBlur = 8;
+      ctx.fillText(m.text, mx, my);
+    }
+    ctx.restore();
+
+    // 4. Trailing Dissolver Embers / Particles at Leading Active Tip
+    if (activeCount > 0 && pct > 0.01) {
+      const tipAngle = -Math.PI / 2 + activeCount * dTheta;
+      const tipX = rMid * Math.cos(tipAngle);
+      const tipY = cy + rMid * Math.sin(tipAngle);
+
+      for (let k = 0; k < 2; k++) {
+        const spd = 26 + Math.random() * 36;
+        const tanAngle = tipAngle + Math.PI / 2 + (Math.random() - 0.5) * 0.9;
+        this.decayGaugeParticles.push({
+          x: tipX + (Math.random() - 0.5) * 8,
+          y: tipY + (Math.random() - 0.5) * 8,
+          vx: Math.cos(tanAngle) * spd + (Math.random() - 0.5) * 16,
+          vy: Math.sin(tanAngle) * spd + (Math.random() - 0.5) * 16,
+          size: 2.6 + Math.random() * 4.8,
+          life: 0.6 + Math.random() * 0.35,
+          maxLife: 0.95,
+          color: decayColor.glow
+        });
+      }
+    }
+
+    // Update and draw existing trailing particles
+    for (let i = this.decayGaugeParticles.length - 1; i >= 0; i--) {
+      const p = this.decayGaugeParticles[i];
+      p.life -= dt;
+      if (p.life <= 0) {
+        this.decayGaugeParticles.splice(i, 1);
+        continue;
+      }
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= Math.pow(0.92, dt * 60);
+      p.vy *= Math.pow(0.92, dt * 60);
+
+      const pAlpha = Math.max(0, p.life / p.maxLife);
+      const pSize = p.size * (0.35 + 0.65 * pAlpha);
+
+      ctx.save();
+      ctx.globalAlpha = pAlpha;
+      ctx.fillStyle = p.color;
+      ctx.shadowColor = p.color;
+      ctx.shadowBlur = 10;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, pSize, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // 5. Center Labels inside Semicircle (DECAY + big bold 8-second timer + percentage)
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    const textX = 112;
+
+    // Top: "DECAY" title
+    ctx.font = "900 16px 'Press Start 2P', monospace";
+    ctx.fillStyle = decayColor.main;
+    ctx.shadowColor = decayColor.glow;
+    ctx.shadowBlur = 10;
+    ctx.fillText('DECAY', textX, cy - 48);
+
+    // Center: Big Bold 8-Second Countdown Timer (Showing 8.0s down to 0.0s)
+    ctx.font = "900 52px 'Outfit', sans-serif";
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = decayColor.glow;
+    ctx.shadowBlur = 20;
+    ctx.fillText(this.decayTimer.toFixed(1) + 's', textX, cy + 12);
+
+    // Bottom: Percentage
+    const pctInt = Math.round(pct * 100);
+    ctx.font = "800 24px 'Outfit', sans-serif";
+    ctx.fillStyle = decayColor.main;
+    ctx.shadowBlur = 8;
+    ctx.fillText(`${pctInt}%`, textX, cy + 60);
+
+    ctx.restore();
+  }
+
+  // Renders retro blackish-reddish pixel corruption closing up towards center
+  drawPixelCorruption(ctx) {
+    if (!this.decayActive || !this.isDecayDemoting) return;
+
+    // First 2.4s: user clearly sees platform break and person float all the way to center
+    if (this.decayDemoteTimer < 2.4) return;
+
+    // Once player reaches center, fine retro black and red pixels steadily creep in (2.4s to 4.6s)
+    const rawProgress = Math.min(1.0, (this.decayDemoteTimer - 2.4) / 2.2);
+    const demoteProgress = Math.pow(rawProgress, 1.12);
+
+    // Fine, dense retro digital pixels (~7-8px) instead of huge chunky blocks
+    const pixelSize = Math.max(7, Math.floor(8 * this.scale));
+    const cols = Math.ceil(this.width / pixelSize);
+    const rows = Math.ceil(this.height / pixelSize);
+
+    const D_max = Math.hypot(this.cx, this.cy);
+    const maxEdge = Math.min(this.width, this.height) * 0.5;
+
+    const getNoise = (x, y) => {
+      let n = (x * 374761393 + y * 668265263) ^ 0x5bf03635;
+      n = Math.imul(n ^ (n >>> 13), 1274126177);
+      return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+    };
+
+    ctx.save();
+
+    for (let c = 0; c < cols; c++) {
+      const px = (c + 0.5) * pixelSize;
+      const distEdgeX = Math.min(px, this.width - px);
+
+      for (let r = 0; r < rows; r++) {
+        const py = (r + 0.5) * pixelSize;
+        const distCenter = Math.hypot(px - this.cx, py - this.cy);
+
+        const distEdgeY = Math.min(py, this.height - py);
+        const distEdge = Math.min(distEdgeX, distEdgeY);
+
+        // Chunky 2x2 macro-block noise + micro cell noise for natural pixel clusters
+        const bx = Math.floor(c / 2);
+        const by = Math.floor(r / 2);
+        const bNoise = getNoise(bx, by);
+        const cNoise = getNoise(c, r);
+        const noise = bNoise * 0.65 + cNoise * 0.35;
+
+        // Inward progression metrics: distance from outer edges and center
+        const edgeProgress = Math.max(0, 1 - (distEdge / maxEdge));
+        const radProgress = Math.min(1.0, distCenter / (D_max * 0.72));
+        const creepProgress = edgeProgress * 0.68 + radProgress * 0.32;
+
+        // Threshold advancing towards center - when demoteProgress >= 1.0, covers 100%
+        const threshold = (1.0 - demoteProgress * 1.15) + (noise - 0.5) * 0.22;
+
+        if (creepProgress < threshold) {
+          continue;
+        }
+
+        const invasionDepth = creepProgress - threshold;
+
+        // Authentic Retro Thematic Blackish-Reddish Palette
+        if (invasionDepth > 0.24) {
+          // Deep consumed zone: mostly void obsidian with bruised maroon
+          if (cNoise < 0.55) {
+            ctx.fillStyle = '#050207'; // obsidian black
+          } else if (cNoise < 0.80) {
+            ctx.fillStyle = '#0f020a'; // charred black
+          } else if (cNoise < 0.93) {
+            ctx.fillStyle = '#22010c'; // dried blood maroon
+          } else {
+            ctx.fillStyle = '#450014'; // deep burgundy
+          }
+          ctx.fillRect(c * pixelSize, r * pixelSize, pixelSize, pixelSize);
+        } else if (invasionDepth > 0.06) {
+          // Mid creeping zone: rich blackish-reddish mosaic
+          if (cNoise < 0.35) {
+            ctx.fillStyle = '#09030d'; // void charcoal
+          } else if (cNoise < 0.65) {
+            ctx.fillStyle = '#2d010d'; // blood maroon
+          } else if (cNoise < 0.85) {
+            ctx.fillStyle = '#520018'; // charred crimson
+          } else {
+            ctx.fillStyle = '#7a0024'; // raw burgundy
+          }
+          ctx.fillRect(c * pixelSize, r * pixelSize, pixelSize, pixelSize);
+        } else {
+          // Frontline creeping edge: glowing jagged crimson with digital flicker
+          const flicker = (Math.sin(this.gameTime * 24 + c * 5 + r * 7) > 0.1) ? 1.0 : 0.7;
+          ctx.globalAlpha = flicker;
+          if (cNoise < 0.40) {
+            ctx.fillStyle = '#ff0044'; // vivid neon crimson
+          } else if (cNoise < 0.70) {
+            ctx.fillStyle = '#bd002a'; // rich blood scarlet
+          } else {
+            ctx.fillStyle = '#5a0014'; // dark edge ember
+          }
+          ctx.fillRect(c * pixelSize, r * pixelSize, pixelSize, pixelSize);
+
+          // Hot 1px edge highlight for retro pixel accent
+          if (cNoise < 0.30) {
+            ctx.fillStyle = '#ff6b8b';
+            ctx.fillRect(c * pixelSize + 1, r * pixelSize + 1, pixelSize - 2, 2);
+          }
+          ctx.globalAlpha = 1.0;
+        }
+      }
+    }
+
+    ctx.restore();
   }
 
   update(dt, rawDt = dt) {
@@ -2026,6 +2651,9 @@ class AbyssGame {
     }
 
     if (this.state === 'PLAYING') {
+      if (this.decayActive) {
+        this.updateDecay(dt);
+      }
       this.updatePlayer(dt);
       this.updateHazards(dt);
       this.checkCollisions();
@@ -2036,6 +2664,11 @@ class AbyssGame {
 
   updatePlayer(dt) {
     const p = this.player;
+
+    if (this.isDecayDemoting) {
+      // Space floating physics when outer surface disintegrated
+      return;
+    }
 
     if (p.invincibleTimer > 0) {
       p.invincibleTimer -= dt;
@@ -2359,6 +2992,7 @@ class AbyssGame {
   }
 
   checkCollisions() {
+    if (this.isDecayDemoting) return;
     const p = this.player;
     const pFloor = this.getFloorRadius(p.angle) - 2 * this.scale;
     const pRadius = pFloor - p.radialHeight - 12 * this.scale;
@@ -2519,6 +3153,22 @@ class AbyssGame {
         this.keysCollected++;
         this.audio.play('key', 1.0);
 
+        // Refill decay timer on collecting key / opening gateway
+        if (this.decayActive) {
+          this.decayTimer = this.decayDuration;
+          this.decayAudioStarted = false;
+          this.decayGaugeParticles = [];
+          this.audio.stopDecayAudio();
+          this.screenShake = 0;
+          const container = document.getElementById('decay-meter-container');
+          if (container) container.classList.remove('caution-phase', 'warning-phase');
+          const barFill = document.getElementById('decay-bar-fill');
+          if (barFill) barFill.style.width = '100%';
+          const timerVal = document.getElementById('decay-timer-val');
+          if (timerVal) timerVal.textContent = '8.0s';
+          this.renderDecayGauge(0.016, 1.0);
+        }
+
         this.particles.emit(kx, ky, 24, {
           color: '#fece2c',
           speed: 90 * this.scale,
@@ -2589,7 +3239,7 @@ class AbyssGame {
     // If entering Level 4 (Invert level), player starts at the top (12 o'clock, 3 * Math.PI / 2)!
     // For all other levels, player starts at the bottom (6 o'clock, Math.PI / 2)!
     const nextLevel = this.level + 1;
-    const targetAngle = (nextLevel === 4) ? (3 * Math.PI / 2) : (Math.PI / 2);
+    const targetAngle = Math.PI / 2;
     const diff = Math.atan2(Math.sin(targetAngle - this.door.angle), Math.cos(targetAngle - this.door.angle));
     this.player.angle = this.door.angle + diff * ease;
 
@@ -2611,7 +3261,7 @@ class AbyssGame {
       this.level++;
       this.state = 'PLAYING';
       this.transitionProgress = 0;
-      this.player.angle = (this.level === 4) ? (3 * Math.PI / 2) : (Math.PI / 2);
+      this.player.angle = Math.PI / 2;
       this.player.omega = 0;
       this.player.facing = 1;
       this.spawnLevel(this.level);
@@ -2677,6 +3327,11 @@ class AbyssGame {
     // 4. Draw Player (Inside the circle, head pointing inward)
     this.drawPlayer(ctx, transitionEase);
 
+    // Decay Retro Blackish-Reddish Pixel Corruption Creep (Swallows player and arena as it converges to center)
+    if (this.decayActive && this.state === 'PLAYING') {
+      this.drawPixelCorruption(ctx);
+    }
+
     // 5. Draw Abyssal Darkness Spotlight (Level 13 and dark rage modes)
     if (this.isDarkness && this.state === 'PLAYING') {
       this.drawDarkness(ctx);
@@ -2704,11 +3359,18 @@ class AbyssGame {
 
     // --- BLOB 0: Outer Active Ring ---
     ctx.save();
+    if (this.outerRingDecaying) {
+      // Disintegrate outer wall: fade opacity and add jagged decay fracturing
+      ctx.globalAlpha = Math.max(0.08, 1 - (this.decayDemoteTimer / 2.6));
+    }
     ctx.fillStyle = pal.r0;
     ctx.beginPath();
     for (let i = 0; i <= numPoints; i++) {
       const angle = (i / numPoints) * Math.PI * 2;
-      const wobble = this.getWobble(angle, time, 0) * (1 + ease * 0.5);
+      let wobble = this.getWobble(angle, time, 0) * (1 + ease * 0.5);
+      if (this.outerRingDecaying) {
+        wobble += (Math.sin(angle * 16 + time * 10) + Math.cos(angle * 9 - time * 8)) * 14 * this.scale;
+      }
       const r = r0_target + wobble;
       const x = this.cx + r * Math.cos(angle);
       const y = this.cy + r * Math.sin(angle);
@@ -2717,6 +3379,18 @@ class AbyssGame {
     }
     ctx.closePath();
     ctx.fill();
+
+    // Emit disintegration cyber-ash and burning embers
+    if (this.outerRingDecaying && Math.random() < 0.6) {
+      const randA = Math.random() * Math.PI * 2;
+      const randR = (this.BASE_R0_OUTER * this.scale) + (Math.random() - 0.5) * 35 * this.scale;
+      this.particles.emit(this.cx + randR * Math.cos(randA), this.cy + randR * Math.sin(randA), 2, {
+        color: Math.random() < 0.5 ? '#ff0055' : '#00f3ff',
+        speed: 75 * this.scale,
+        life: 0.55,
+        size: 3.5 * this.scale
+      });
+    }
 
     // If door is unlocked, cut out a clean channel in Ring 0 showing the background through it
     if (this.door.unlocked && this.door.visible !== false && this.state === 'PLAYING') {
@@ -2829,7 +3503,7 @@ class AbyssGame {
     ctx.save();
     ctx.translate(px, py);
     // Tangent orientation: feet touch the outer wall, head points INWARD toward center
-    ctx.rotate(p.angle - Math.PI / 2);
+    ctx.rotate(p.angle - Math.PI / 2 + (p.tumbleAngle || 0));
 
     if (p.facing < 0) {
       ctx.scale(-1, 1);
@@ -2848,16 +3522,17 @@ class AbyssGame {
     ctx.save();
     ctx.fillStyle = this.controlsInverted ? 'rgba(255, 0, 85, 0.22)' : 'rgba(0, 255, 255, 0.22)';
     ctx.beginPath();
-    ctx.ellipse(0, -ph / 2, pw * 0.72, ph * 0.65, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, p.isFloatingInSpace ? 0 : -ph / 2, pw * 0.72, ph * 0.65, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
 
+    const drawY = p.isFloatingInSpace ? -ph / 2 : -ph + 2;
     if (frameImg && frameImg.complete && frameImg.naturalWidth > 0) {
-      // Feet at y = 0, head at y = -ph (inward toward center)
-      ctx.drawImage(frameImg, -pw / 2, -ph + 2, pw, ph);
+      // Feet at y = 0 when grounded, center of mass when floating in space
+      ctx.drawImage(frameImg, -pw / 2, drawY, pw, ph);
     } else {
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(-pw / 2, -ph + 2, pw, ph);
+      ctx.fillRect(-pw / 2, drawY, pw, ph);
     }
 
     ctx.restore();

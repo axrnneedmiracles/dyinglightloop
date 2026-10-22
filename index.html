@@ -44,6 +44,13 @@
       </div>
     </div>
 
+    <!-- Left-Edge Semicircle Decay Timer (Anchored Flush to Left Edge as Sketched) -->
+    <div id="decay-meter-container" class="decay-meter-container hidden" title="Decay Countdown">
+      <canvas id="decay-gauge-canvas" width="380" height="680"></canvas>
+      <span id="decay-timer-val" class="decay-timer-val hidden">8.0s</span>
+      <div id="decay-bar-fill" class="decay-bar-fill hidden"></div>
+    </div>
+
     <!-- Warning / Alert Banner -->
     <div id="alert-banner" class="alert-banner hidden">
       <div id="alert-text" class="alert-text">⚠️ GRAVITY & CONTROLS INVERTED ⚠️</div>
@@ -53,6 +60,11 @@
     <div id="dialogue-banner" class="dialogue-banner hidden">
       <div class="dialogue-speaker">DYING LIGHT</div>
       <div id="dialogue-text" class="dialogue-text">"You thought this was so easy to pass?"</div>
+    </div>
+
+    <!-- Decay Demotion Void Transition Overlay (Glitch + Blackout - Textless) -->
+    <div id="decay-demote-overlay" class="decay-demote-overlay hidden">
+      <div class="decay-glitch-layer"></div>
     </div>
 
     <!-- STEP 1: INITIAL ENTRY SCREEN (User visits and clicks START GAME) -->

@@ -13,3 +13,8 @@ trans_detail_*.jpg
 blob_*.jpg
 GAME VIDEO.mp4
 sprite_catalog.png
+*.docx
+generate_docs.py
+server.js
+package.json
+package-lock.json
